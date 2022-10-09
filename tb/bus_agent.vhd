@@ -1,152 +1,112 @@
-------------------------------------------------------------------
--- Name		     : bus_agent.vhd
--- Description : Agent for testing of arbiter
--- Designed by : Claudio Avi Chami - FPGA Site
---               http://fpgasite.blogspot.com
--- Version     : 01
-------------------------------------------------------------------
+----------------------------------------------------------------------------------
+-- Company:  FPGA'er
+-- Engineer: Claudio Avi Chami - FPGA'er Website
+--           http://fpgaer.tech
+-- Create Date: 09.10.2022 
+-- Module Name: bus_agent.vhd
+-- Description: Simulation file for testing an arbiter
+--              Generates realistic req vs gnt behavior for a 
+--              master connected to an arbiter
+--              
+-- Dependencies: none
+-- 
+-- Revision: 1
+-- Revision  1 - Initial release
+-- 
+----------------------------------------------------------------------------------------------------------------------------------------------------
+
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
-use ieee.math_real.all;
-
 
 entity bus_agent is
-	port (
-		clk: 		 in std_logic;
-		rst: 		 in std_logic;
-		
-		-- inputs
-		gnt:		  in std_logic;
-		t_stamp:  in std_logic_vector(31 downto 0);
-		stat_no:  in integer;
-		
-		-- outputs
-		req:		  out std_logic;
-    
+  port (
+    clk                : in  std_logic;
+    rstn               : in  std_logic;
+
+    -- inputs
+    gnt                : in  std_logic;
+    busy_in            : in  std_logic;
+
+    -- outputs
+    req                : out std_logic;
+    busy               : out std_logic;
+
     -- statistic outputs
-    no_of_transactions   : out real;
-    max_latency          : out real;
-    max_latency_tstamp   : out std_logic_vector(31 downto 0);
-    ave_latency          : out real;  
-    accum_duration       : out real  
-	);
+    no_of_transactions : out integer;
+    max_latency        : out integer;
+    timeouts           : out integer
+  );
 end bus_agent;
 
 architecture rtl of bus_agent is
 
-  constant MIN_DURATION : natural := 7;
-  constant MAX_DURATION : natural := 15;
-  signal   THRESHOLD_LO : real;
-  signal   THRESHOLD_HI : real;
-  signal   THRESHOLD    : real := 0.04;
-  
-  signal   req_i        : std_logic;
-  signal   gnt_d        : std_logic;
-  signal   gnt_re       : std_logic;
-  signal   gnt_re_d     : std_logic;
-  signal   no_of_transactions_i : real;
-  
-begin 
+  constant DURATION : natural := 6;
+  constant PAUSE : natural := 30;
+  constant TIMEOUT : natural := 127;
+
+  type st_T is (idle, pause_st, req_st, timeout_st, send);
+  signal st : st_T;
+  signal packet_duration : integer;
+  signal packet_pause : integer;
+  signal latency : integer;
+begin
 
   -- generate requests
-  gen_req_pr: process (clk, rst) 
-    variable seed1, seed2: positive;            -- seed values for random generator
-    variable rand: real;                        -- random real-number value in range 0 to 1.0  
-    variable duration: integer range 0 to 100;                   
-    variable accum_duration_i: real;                   
-  begin 
-    if (rst = '1') then 
-      req_i		         <= '0';
-      accum_duration_i := 0.0;
-      
-      -- The thresholds are assigned values dependant on their station value so each station will start
-      -- random requests at different times
-      THRESHOLD_LO <= real(stat_no)/10.0;
-      THRESHOLD_HI <= real(stat_no)/10.0+THRESHOLD;
-    elsif (rising_edge(clk)) then
-      if (gnt = '1') then
-        -- Keep track of duration of current 'transaction'
-        if (duration > 0) then
-          duration := duration - 1;
-        else
-          req_i    <= '0';
-        end if;          
-      elsif (req_i = '0') then
-        uniform(seed1, seed2, rand);            -- generate random number
-        if (rand > THRESHOLD_LO) and (rand < THRESHOLD_HI) then
-          uniform(seed1, seed2, rand);          -- generate random number
-          duration := MIN_DURATION + integer(rand*(real(MAX_DURATION - MIN_DURATION)));
-          accum_duration_i := accum_duration_i + real(duration);
-          req_i    <= '1';
-        end if;          
+  gen_req_pr : process (clk)
+  begin
+    if (rising_edge(clk)) then
+      if (rstn = '0') then
+        req <= '0';
+        no_of_transactions <= 0;
+        max_latency <= 0;
+        timeouts <= 0;
+        busy <= '0';
+        st <= idle;
+      else
+        case st is
+          when idle =>
+            latency <= 0;
+            st <= req_st;
+          when req_st =>
+            req <= '1';
+            if (latency = TIMEOUT) then
+              req <= '0';
+              st <= timeout_st;
+            elsif (gnt = '1' and busy_in = '0') then
+              -- Grant received, update max_latency
+              if (latency > max_latency) then
+                max_latency <= latency;
+              end if;
+              no_of_transactions <= no_of_transactions + 1;
+              packet_duration <= DURATION - 1;
+              busy <= '1';
+              st <= send;
+            else
+              latency <= latency + 1;
+            end if;
+          when timeout_st =>
+            timeouts <= timeouts + 1;
+            packet_pause <= pause;
+            st <= pause_st;
+          when send =>
+            req <= '0';
+            if (packet_duration = 0) then
+              packet_pause <= PAUSE - 1;
+              busy <= '0';
+              st <= pause_st;
+            else
+              packet_duration <= packet_duration - 1;
+            end if;
+          when pause_st =>
+            if (packet_pause = 0) then
+              st <= idle;
+            else
+              packet_pause <= packet_pause - 1;
+            end if;
+        end case;
       end if;
-    end if;   
-    accum_duration <= accum_duration_i;
-    
+    end if;
   end process gen_req_pr;
 
-  req <= req_i;
-  
-  -- keep track of values for statistics
-  -- grant signal rising edge
-  gnt_pr: process (clk, rst) 
-  begin 
-    if (rst = '1') then 
-      gnt_d		  <= '0';
-      gnt_re_d	<= '0';
-    elsif (rising_edge(clk)) then
-      gnt_d     <= gnt;
-      gnt_re_d  <= gnt_re;
-    end if;
-  end process gnt_pr;
-  
-  gnt_re <= '1' when gnt_d = '0' and gnt = '1' else '0';
-  
-  -- calculate latency
-  lat_pr: process (rst, clk) 
-    variable latency : real;
-    variable max_latency_i : real;
-    variable accum_latency : real;
-  begin 
-    if (rst = '1') then 
-      max_latency_i  := 0.0;
-      accum_latency  := 0.0;
-      max_latency_tstamp <= (others => '0');
-      ave_latency   <= 0.0; 
-    elsif (rising_edge(clk)) then
-      if (req_i = '0') then
-        latency := 0.0;
-      else
-        if (gnt = '0') then
-          latency := latency + 1.0; 
-        elsif (gnt_re_d = '1') then
-          -- Update statistic counters    
-          if (latency > max_latency_i) then
-            max_latency_i      := latency;
-            max_latency_tstamp <= t_stamp;
-          end if;
-          
-          accum_latency := accum_latency + latency;
-          ave_latency   <= accum_latency / no_of_transactions_i;
-        end if;  
-      end if;    
-        
-    end if;
-    max_latency <= max_latency_i;
-  end process lat_pr;
-  
-  -- count transactions
-  transaction_cnter_pr: process (rst, clk) 
-  begin
-    if (rst = '1') then 
-      no_of_transactions_i  <= 0.0;
-    elsif (rising_edge(clk)) then
-      if (gnt_re) = '1' then
-        no_of_transactions_i  <= no_of_transactions_i + 1.0;
-      end if;
-    end if;
-  end process transaction_cnter_pr;
-  no_of_transactions <= no_of_transactions_i;  
-  
 end rtl;
