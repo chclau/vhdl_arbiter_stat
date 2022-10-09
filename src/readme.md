@@ -1,1 +1,1 @@
-Source files for the vhdl tutorial
+Source files for the vhdl tutorial - advanced simulation
